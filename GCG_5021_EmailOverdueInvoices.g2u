@@ -1,0 +1,178 @@
+Program.Sub.Preflight.Start
+V.Global..BulkDeclareString(sEmail,sNoEmail)
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Author Bix
+'Date 5/4/18
+'Customer C-Aire, Inc.
+'GCG_5021_EmailOverdueInvoices.g2u
+'Gets list of customer that overdue invoices, generates AR statement for them, and sends the statement to the customer
+
+'Get Data Table of All Overdue Invoices
+F.Intrinsic.Control.CallSub(GetOverdueInvoices)
+'Export copies of invoice statements to \Global\Files\Overdue_Statements
+F.Intrinsic.Control.CallSub(GenInvStatements)
+'Email Invoice Statements if Courier is running
+F.Intrinsic.Control.CallSub(EmailInvStatements)
+'Unload datatable and close program
+F.Intrinsic.Control.CallSub(Unload)
+Program.Sub.Main.End
+
+Program.Sub.GetOverdueInvoices.Start
+F.Intrinsic.Control.Try
+V.Local.sError.Declare
+	V.Local.sSQL.Declare
+	V.Local.dToday.Declare
+	
+	V.Local.dToday.Set(V.Ambient.Date)
+	F.Intrinsic.String.Build("select distinct rtrim(CUSTOMER) as 'CustNo', '' as 'Cust', '' as 'Email', '' as 'FilePath', '' as 'FileName' from V_AR_OPEN_ITEMS where DUE_DATE <> '1900-01-01' and DUE_DATE < '{0}' order by 'CustNo'",V.Local.dToday.PervasiveDate,V.Local.sSQL)
+	F.Intrinsic.Control.CallSub(OpenConnection)
+	F.Data.DataTable.CreateFromSQL("dtOverdue","con",V.Local.sSQL,True)
+	F.Data.Dictionary.CreateFromSQL("dictEmail","con","select A.CUSTOMER, if(rtrim(EMAIL) = '', CUST_EMAIL, EMAIL) from V_CUSTOMER_SALES A left join ATG_CUSTOMER_EMAIL B on A.CUSTOMER = B.CUSTOMER order by A.CUSTOMER")
+'	F.Data.Dictionary.CreateFromSQL("dictEmail","con","select A.CUSTOMER, if(rtrim(CUST_EMAIL) = '', EMAIL, CUST_EMAIL) from V_CUSTOMER_SALES A left join ATG_CUSTOMER_EMAIL B on A.CUSTOMER = B.CUSTOMER order by A.CUSTOMER")
+	F.Data.Dictionary.SetDefaultReturn("dictEmail","")
+	F.Data.Dictionary.CreateFromSQL("dictCust","con","select CUSTOMER, NAME_CUSTOMER from V_CUSTOMER_MASTER order by CUSTOMER")
+	F.Intrinsic.Control.CallSub(CloseConnection)
+	F.Data.DataTable.FillFromDictionary("dtOverdue","dictEmail","CustNo","Email")
+	F.Data.Dictionary.Close("dictEmail")
+	F.Data.DataTable.FillFromDictionary("dtOverdue","dictCust","CustNo","Cust")
+	F.Data.Dictionary.Close("dictCust")
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.GetOverdueInvoices.End
+
+Program.Sub.GenInvStatements.Start
+'\Global\Files\Overdue_Statements\CUSTOMER_DATE_TIME.pdf
+F.Intrinsic.Control.Try
+	V.Local..BulkDeclareString(sError,sFilePath,sFileName,sParams,sValues,sEmail,sSQL,sDate,sDates,sTime,sRet)
+	V.Local.i.Declare
+	
+	F.Intrinsic.String.Format(V.Ambient.Date,"MMDDYY",V.Local.sDate)
+	F.Intrinsic.String.Format(V.Ambient.Date,"YYYYMMDD",V.Local.sDates)
+	F.Intrinsic.Control.For(V.Local.i,0,V.DataTable.dtOverdue.RowCount--,1)
+		'Replacing "/" with "-" because they are causing issues with creating files and sending emails
+		F.Intrinsic.String.Replace(V.DataTable.dtOverdue(V.Local.i).Cust!FieldValTrim,"/","-",V.Local.sRet)
+		F.Data.DataTable.SetValue("dtOverdue",V.Local.i,"Cust",V.Local.sRet)
+		F.Intrinsic.String.TimeString(V.Ambient.Time,V.Local.sTime)
+		F.Intrinsic.String.Build("{0}_{1}_{2}.PDF",V.DataTable.dtOverdue(V.Local.i).Cust!FieldValTrim,V.Local.sDate,V.Local.sTime,V.Local.sFileName)
+		F.Intrinsic.String.Build("{0}\Overdue_Statements\",V.Caller.FilesDir,V.Local.sFilePath)
+		F.Data.DataTable.SetValue("dtOverdue",V.Local.i,"FileName",V.Local.sFileName)
+		F.Data.DataTable.SetValue("dtOverdue",V.Local.i,"FilePath",V.Local.sFilePath)
+		F.Intrinsic.String.Build("{0}{1}",V.Local.sFilePath,V.Local.sFileName,V.Local.sFilePath)
+		'The following Callwrapper is to run AR statements report with the passed information:
+		'CustStart !*! CustEnd !*! Date !*! Attn(Y/N) !*! Country(Y/N) !*! Total(Y/N) !*! HeadingDate !*! BeginningBranch !*! EndingBranch !*! Branch(Y/N) !*! PrintZero(Y/N) !*! |~|CRYSTAL-OVERRIDE|~|
+		F.Intrinsic.String.Build("{0}!*!{0}!*!{1}!*!N!*!N!*!Y!*!{2}!*!!*!!*!N!*!N!*!|~|CRYSTAL-OVERRIDE|~|",V.DataTable.dtOverdue(V.Local.i).CustNo!FieldValTrim,V.Local.sDate,V.Local.sDate,V.Local.sValues)
+		F.Global.General.CallWrapperSyncBIO(3050,V.Local.sValues)
+		'Building query to see if callwrapper generated data in the BI Table
+		F.Intrinsic.String.Build("select 1 from LASER_AR_STMNT where TERMINAL_NO = '{0}' and ACCOUNT = '{1}'",V.Caller.Terminal,V.DataTable.dtOverdue(V.Local.i).CustNo!FieldValTrim,V.Local.sSQL)
+		
+		F.Intrinsic.Control.CallSub(OpenConnection)
+		F.ODBC.Connection!con.ExecuteAndReturn(V.Local.sSQL,V.Local.sRet)
+		F.Intrinsic.Control.CallSub(CloseConnection)
+		F.Intrinsic.Control.If(V.Local.sRet,!=,"")
+			'Generate report if data was found in BI Table
+			'TerminalNumber *!* REPORTID *!* ATTN *!* TITLE1 *!* TITLE2 *!* TITLE3 *!* TITLE4
+			'Use caller *!* 000562 *!* N *!* Current Total *!* 30 to 59 Total *!* 60 to 150 Total *!* Over 150 Total
+			V.Local.sParams.Set("Terminal*!*REPORTID*!*ATTN*!*TITLE1*!*TITLE2*!*TITLE3*!*TITLE4")
+			F.Intrinsic.String.Split(V.Local.sParams,"*!*",V.Local.sParams)
+			F.Intrinsic.String.Build("{0}*!*000562*!*N*!*Current Total*!*30 to 59 Total*!*60 to 150 Total*!*Over 150 Total",V.Caller.Terminal,V.Local.sValues)
+			F.Intrinsic.String.Split(V.Local.sValues,"*!*",V.Local.sValues)
+			F.Global.BI.SaveReport(562,1,V.Local.sParams,V.Local.sValues,V.Local.sFilePath)
+		F.Intrinsic.Control.Else
+			'delete row from DT if no statement was generated
+			F.Data.DataTable.DeleteRow("dtOverdue",V.Local.i)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.Next(V.Local.i)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.GenInvStatements.End
+
+Program.Sub.EmailInvStatements.Start
+F.Intrinsic.Control.Try
+	V.Local..BulkDeclareString(sError,sSubject,sMessage,sSend,sCompany,sReceive,sFilePath,sLog,sDate,sTime)
+	V.Local..BulkDeclareLong(i,iCourier,iUser)
+	
+	'Load values constant for all emails
+	F.Global.Security.GetUserId("JANITA",V.Caller.CompanyCode,V.Local.iUser)
+	F.Global.General.ReadCompanyName(V.Caller.CompanyCode,V.Local.sCompany)
+	V.Local.sSend.Set("ap@caireinc.net*!*C-Aire Inc.")
+	V.Local.sLog.Set("Cust -- Email")
+	
+	'Lots of log building going on when generating or not generating emails dependant on if the email address for the customer is present
+	F.Intrinsic.Control.For(V.Local.i,0,V.DataTable.dtOverdue.RowCount--,1)
+		F.Intrinsic.Control.If(V.DataTable.dtOverdue(V.Local.i).RowState,!=,8)
+			F.Intrinsic.Control.If(V.DataTable.dtOverdue(V.Local.i).Email!FieldValTrim,=,"")
+				F.Intrinsic.String.Build("{0}{1}{2} -- No email found",V.Local.sLog,V.Ambient.NewLine,V.DataTable.dtOverdue(V.Local.i).Cust!FieldValTrim,V.Local.sLog)
+			F.Intrinsic.Control.Else
+				F.Intrinsic.String.Build("{0} - Monthly Statement",V.DataTable.dtOverdue(V.Local.i).Cust!FieldValTrim,V.Local.sSubject)
+				F.Intrinsic.String.Build("{0}*!*{1}",V.DataTable.dtOverdue(V.Local.i).Cust!FieldValTrim,V.DataTable.dtOverdue(V.Local.i).Email!FieldValTrim,V.Local.sReceive)
+			'	F.Intrinsic.String.Build("{0}Please send your ST3 or W9 Documentation",V.Local.sMessage,V.Local.sMessage)
+				F.Intrinsic.String.Build("{0}*!*{1}",V.DataTable.dtOverdue(V.Local.i).FileName!FieldValTrim,V.DataTable.dtOverdue(V.Local.i).FilePath!FieldValTrim,V.Local.sFilePath)
+				F.Global.Messaging.QueueMessage(V.Caller.CompanyCode,V.Local.iUser,"GSSMenu.exe",V.Local.sSubject,V.Local.sSend,V.Local.sReceive,"Here is your monthly statement. Have a great day. Thank you.",5,V.DataTable.dtOverdue(V.Local.i).Email!FieldValTrim,False,"",,"","","","","",V.Local.sFilePath,False)
+				F.Intrinsic.String.Build("{0}{1}{2} -- {3}",V.Local.sLog,V.Ambient.NewLine,V.DataTable.dtOverdue(V.Local.i).Cust!FieldValTrim,V.DataTable.dtOverdue(V.Local.i).Email!FieldValTrim,V.Local.sLog)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.Next(V.Local.i)
+	
+	F.Intrinsic.String.DateString(V.Ambient.Date,V.Local.sDate)
+	F.Intrinsic.String.TimeString(V.Ambient.Time,V.Local.sTime)
+	F.Intrinsic.String.Build("{0}\Overdue_Statements\Result\{1}_{2}.TXT",V.Caller.FilesDir,V.Local.sDate,V.Local.sTime,V.Local.sFilePath)
+	F.Intrinsic.File.String2File(V.Local.sFilePath,V.Local.sLog)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.EmailInvStatements.End
+
+Program.Sub.Unload.Start
+F.Intrinsic.Control.Try
+V.Local.sError.Declare
+	
+	F.Data.DataTable.Close("dtOverdue")
+	F.Intrinsic.Control.End
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.Unload.End
+
+Program.Sub.OpenConnection.Start
+'open "con" connection
+F.Intrinsic.Control.Try
+V.Local.sError.Declare
+	
+	F.ODBC.Connection!con.OpenCompanyConnection
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.OpenConnection.End
+
+Program.Sub.CloseConnection.Start
+'close "con" connection
+F.Intrinsic.Control.Try
+V.Local.sError.Declare
+	
+	F.ODBC.Connection!con.Close
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.CloseConnection.End
